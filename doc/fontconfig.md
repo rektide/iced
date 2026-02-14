@@ -1,54 +1,47 @@
 # Fontconfig Strategy
 
-This document explores future options for giving applications control over fontconfig/system font loading behavior.
+This document describes fontconfig control options and explores future improvements.
 
-## Current State
+## Feature Flags
 
-The `fontconfig` feature flag controls whether system fonts are loaded via fontconfig on Linux:
-- **Enabled (default)**: All system fonts in `/usr/share/fonts` and other fontconfig paths are scanned at startup
-- **Disabled**: Only bundled fonts (Iced-Icons, optionally Fira Sans) and explicitly loaded fonts are available
+Three feature flags control font loading behavior:
 
-The slowdown issue is tracked in [issue #2455](https://github.com/iced-rs/iced/issues/2455).
+| Feature | Behavior |
+|---------|----------|
+| `fontconfig` (default) | System fonts loaded automatically at startup |
+| `fontconfig-explicit` | App must call `iced::font::configure()` before text rendering |
+| Neither | No system fonts - bundled + explicitly loaded fonts only |
 
-## Future Options
+## Using `fontconfig-explicit`
 
-### 1. Application-Controlled Font System Initialization
-
-Allow applications to provide their own `FontSystem` configuration:
+When enabled, the application **must** configure the font system before any text rendering:
 
 ```rust
-// In iced_core or iced_graphics
-pub struct FontConfig {
-    /// Whether to load system fonts via fontconfig
-    pub load_system_fonts: bool,
-    /// Custom font paths to scan (beyond fontconfig)
-    pub font_paths: Vec<PathBuf>,
-    /// Embedded fonts to include
-    pub embedded_fonts: Vec<&'static [u8]>,
-}
+use iced::font::{configure, FontConfig};
 
-impl Default for FontConfig {
-    fn default() -> Self {
-        Self {
-            load_system_fonts: cfg!(feature = "fontconfig"),
-            font_paths: vec![],
-            embedded_fonts: vec![],
-        }
-    }
-}
-
-// Application can configure before first text render
-iced::Settings {
-    fonts: FontConfig {
-        load_system_fonts: false,
-        embedded_fonts: vec![MY_FONT_BYTES],
-        ..Default::default()
-    },
-    ..Default::default()
+fn main() -> iced::Result {
+    // Configure BEFORE calling .run() or any text rendering
+    configure(FontConfig {
+        load_system_fonts: false,  // Fast startup, no system fonts
+    });
+    
+    iced::application("MyApp", update, view).run()
 }
 ```
 
-### 2. Lazy Font Loading
+### `FontConfig` Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `load_system_fonts` | `bool` | Whether to scan system fonts via fontconfig |
+
+## Performance Impact
+
+On systems with many fonts (e.g., 7GB+ of font files), disabling system font loading can reduce startup time from seconds to milliseconds in debug builds.
+
+## Future Enhancements
+
+### 1. Lazy Font Loading
 
 Defer font scanning until a font is actually needed:
 
@@ -66,26 +59,33 @@ Cons:
 - First text render with a system font has latency
 - Requires upstream changes to cosmic-text/fontdb
 
-### 3. Font Preloading API
+### 2. Custom Font Paths
 
-Let applications pre-load fonts on a background thread:
+Allow specifying custom font directories:
 
 ```rust
-// In application init, optionally spawn background font loading
+pub struct FontConfig {
+    pub load_system_fonts: bool,
+    pub font_paths: Vec<PathBuf>,  // Additional paths to scan
+}
+```
+
+### 3. Font Preloading API
+
+Load fonts on a background thread:
+
+```rust
 fn main() -> iced::Result {
-    let font_loader = iced::font::Loader::new();
+    let loader = iced::font::Loader::new();
+    loader.preload_system_fonts();  // Spawns background task
     
-    // Preload fonts in background
-    font_loader.preload_system_fonts();
-    
-    // Continue with UI init - fonts will be ready when needed
     my_app().run(iced::Settings::default())
 }
 ```
 
-### 4. Caching Font Database
+### 4. Font Database Caching
 
-Cache the fontdb scan results to disk:
+Cache fontdb scan results to disk:
 
 ```rust
 // On first run, scan and cache fontdb to XDG cache dir
@@ -100,60 +100,14 @@ Pros:
 Cons:
 - Cache invalidation complexity
 - Stale cache issues
-- Cross-platform cache location handling
-
-### 5. Selective Fontconfig Directories
-
-Allow specifying which fontconfig directories to scan:
-
-```rust
-pub enum FontSource {
-    /// Use system fontconfig (all directories)
-    System,
-    /// Only scan specific directories
-    Paths(Vec<PathBuf>),
-    /// Only use embedded fonts
-    Embedded,
-}
-
-iced::Settings {
-    font_source: FontSource::Paths(vec![
-        "/usr/share/fonts/truetype/dejavu".into(),
-    ]),
-    ..Default::default()
-}
-```
-
-### 6. Fontconfig Query-Only Mode
-
-Use fontconfig to query font paths but don't pre-scan:
-
-```rust
-// When rendering text, query fontconfig for the specific font
-// Load only that font file, not all system fonts
-```
-
-This would require fontdb to support on-demand loading rather than batch scanning.
-
-## Recommended Path Forward
-
-1. **Short-term** (current implementation): Feature flag to disable fontconfig entirely
-2. **Medium-term**: Option 1 - Application-controlled FontConfig in Settings
-3. **Long-term**: Option 2 - Lazy loading with upstream cosmic-text changes
-
-The medium-term solution provides the best balance of:
-- Application control
-- No upstream changes required
-- Sensible defaults for common cases
-- Escape hatch for performance-sensitive applications
 
 ## Implementation Notes
 
 ### Related Code Locations
 
-- `graphics/src/text.rs:115-133` - FontSystem initialization
-- `wgpu/src/image/vector.rs:54-60` - SVG font loading (uses usvg's fontdb)
-- `tiny_skia/src/vector.rs:90-96` - SVG font loading (uses usvg's fontdb)
+- `graphics/src/text.rs` - FontSystem initialization and configuration
+- `wgpu/src/image/vector.rs` - SVG font loading (uses usvg's fontdb)
+- `tiny_skia/src/vector.rs` - SVG font loading (uses usvg's fontdb)
 
 ### cosmic-text Feature Flags
 
@@ -167,4 +121,4 @@ Current configuration in workspace:
 cosmic-text = { version = "0.16", default-features = false, features = ["std", "swash"] }
 ```
 
-With `fontconfig` feature enabling the additional `fontconfig` feature.
+The `fontconfig` and `fontconfig-explicit` features enable the `fontconfig` feature on cosmic-text.
